@@ -23,6 +23,15 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <string.h>
+#include <errno.h>
+
+#ifdef FLB_SYSTEM_WINDOWS
+#include <shlwapi.h>
+#else
+#include <glob.h>
+#include <fnmatch.h>
+#include <unistd.h>
+#endif
 
 #include <fluent-bit/flb_info.h>
 #include <fluent-bit/flb_compat.h>
@@ -41,11 +50,16 @@
 #include "../in_tail/tail_config.h"
 #include "../in_tail/tail_scan.h"
 #include "../in_tail/tail_file.h"
+#include "../in_tail/tail_signal.h"
 
 struct pattern_entry {
     flb_sds_t pattern;
     struct mk_list _head;
 };
+
+/* Forward declarations */
+static int tail_http_filter_scan(struct mk_list *path_list,
+                                 struct flb_tail_http_filter_config *http_ctx);
 
 static int in_tail_http_filter_collect_pending(struct flb_input_instance *ins,
                                               struct flb_config *config, void *in_context)
@@ -73,12 +87,14 @@ static int in_tail_http_filter_scan_callback(struct flb_input_instance *ins,
 {
     struct flb_tail_http_filter_config *ctx = context;
     time_t now = time(NULL);
-    
+
+    /* Refresh HTTP patterns if interval has passed */
     if (now - ctx->last_fetch_time > ctx->refresh_interval) {
         fetch_http_data(ctx, config);
     }
-    
-    return flb_tail_scan(ctx->tail_config->path_list, ctx->tail_config);
+
+    /* Use custom scan function with HTTP filtering */
+    return tail_http_filter_scan(ctx->tail_config->path_list, ctx);
 }
 
 int fetch_http_data(struct flb_tail_http_filter_config *ctx, struct flb_config *config)
@@ -185,19 +201,346 @@ int is_file_allowed(const char *file_path, struct flb_tail_http_filter_config *c
 {
     struct pattern_entry *entry;
     struct mk_list *curr;
-    
+
     if (mk_list_is_empty(&ctx->allowed_patterns)) {
-        return FLB_FALSE;
+        /* If no patterns fetched from HTTP, allow all files */
+        return FLB_TRUE;
     }
-    
+
     mk_list_foreach(curr, &ctx->allowed_patterns) {
         entry = mk_list_entry(curr, struct pattern_entry, _head);
         if (strstr(file_path, entry->pattern)) {
             return FLB_TRUE;
         }
     }
-    
+
     return FLB_FALSE;
+}
+
+/* Check if file is in exclude list */
+static int tail_http_filter_is_excluded(char *path, struct flb_tail_config *ctx)
+{
+    struct mk_list *head;
+    struct flb_slist_entry *pattern;
+
+    if (!ctx->exclude_list) {
+        return FLB_FALSE;
+    }
+
+    mk_list_foreach(head, ctx->exclude_list) {
+        pattern = mk_list_entry(head, struct flb_slist_entry, _head);
+#ifdef FLB_SYSTEM_WINDOWS
+        if (PathMatchSpecA(path, pattern->str)) {
+            return FLB_TRUE;
+        }
+#else
+        if (fnmatch(pattern->str, path, 0) == 0) {
+            return FLB_TRUE;
+        }
+#endif
+    }
+
+    return FLB_FALSE;
+}
+
+#ifdef FLB_SYSTEM_WINDOWS
+/*
+ * Windows: Register a file with HTTP filtering
+ */
+static int tail_http_filter_register_file(const char *target,
+                                          struct flb_tail_http_filter_config *http_ctx,
+                                          time_t ts)
+{
+    int64_t mtime;
+    struct stat st;
+    char path[MAX_PATH];
+    ssize_t ignored_file_size;
+    struct flb_tail_config *ctx = http_ctx->tail_config;
+
+    ignored_file_size = -1;
+
+    if (_fullpath(path, target, MAX_PATH) == NULL) {
+        flb_plg_error(ctx->ins, "cannot get absolute path of %s", target);
+        return -1;
+    }
+
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return -1;
+    }
+
+    /* HTTP filter check */
+    if (is_file_allowed(path, http_ctx) == FLB_FALSE) {
+        flb_plg_debug(ctx->ins, "http_filter excluded=%s", path);
+        return -1;
+    }
+
+    if (ctx->ignore_older > 0) {
+        mtime = flb_tail_stat_mtime(&st);
+        if (mtime > 0) {
+            if ((ts - ctx->ignore_older) > mtime) {
+                flb_plg_debug(ctx->ins, "excluded=%s (ignore_older)", target);
+                flb_tail_scan_register_ignored_file_size(ctx, path, strlen(path), st.st_size);
+                return -1;
+            }
+        }
+    }
+
+    if (tail_http_filter_is_excluded(path, ctx) == FLB_TRUE) {
+        flb_plg_trace(ctx->ins, "skip '%s' (excluded)", path);
+        return -1;
+    }
+
+    if (ctx->ignore_older > 0) {
+        ignored_file_size = flb_tail_scan_fetch_ignored_file_size(ctx, path, strlen(path));
+        flb_tail_scan_unregister_ignored_file_size(ctx, path, strlen(path));
+    }
+
+    return flb_tail_file_append(path, &st, FLB_TAIL_STATIC, ignored_file_size, ctx);
+}
+
+/*
+ * Windows: Scan pattern with HTTP filtering
+ */
+static int tail_http_filter_scan_pattern(const char *path,
+                                         struct flb_tail_http_filter_config *http_ctx)
+{
+    char *star, *p0, *p1;
+    char pattern[MAX_PATH];
+    char buf[MAX_PATH];
+    int ret;
+    int n_added = 0;
+    time_t now;
+    HANDLE h;
+    WIN32_FIND_DATA data;
+    struct flb_tail_config *ctx = http_ctx->tail_config;
+
+    if (strlen(path) > MAX_PATH - 1) {
+        flb_plg_error(ctx->ins, "path too long '%s'", path);
+        return -1;
+    }
+
+    star = strchr(path, '*');
+    if (star == NULL) {
+        return -1;
+    }
+
+    p0 = star;
+    while (path <= p0 && *p0 != '\\') {
+        p0--;
+    }
+
+    p1 = star;
+    while (*p1 && *p1 != '\\') {
+        p1++;
+    }
+
+    memcpy(pattern, path, (p1 - path));
+    pattern[p1 - path] = '\0';
+
+    h = FindFirstFileA(pattern, &data);
+    if (h == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+
+    now = time(NULL);
+    do {
+        if (!strcmp(".", data.cFileName) || !strcmp("..", data.cFileName)) {
+            continue;
+        }
+
+        if (strchr(data.cFileName, '*')) {
+            continue;
+        }
+
+        memcpy(buf, path, p0 - path + 1);
+        buf[p0 - path + 1] = '\0';
+
+        if (strlen(buf) + strlen(data.cFileName) + strlen(p1) > MAX_PATH - 1) {
+            flb_plg_warn(ctx->ins, "'%s%s%s' is too long", buf, data.cFileName, p1);
+            continue;
+        }
+        strcat(buf, data.cFileName);
+        strcat(buf, p1);
+
+        if (strchr(p1, '*')) {
+            ret = tail_http_filter_scan_pattern(buf, http_ctx);
+            if (ret >= 0) {
+                n_added += ret;
+            }
+            continue;
+        }
+
+        ret = tail_http_filter_register_file(buf, http_ctx, now);
+        if (ret == 0) {
+            n_added++;
+        }
+    } while (FindNextFileA(h, &data) != 0);
+
+    FindClose(h);
+    return n_added;
+}
+
+/*
+ * Windows: Scan path with HTTP filtering
+ */
+static int tail_http_filter_scan_path(const char *path,
+                                      struct flb_tail_http_filter_config *http_ctx)
+{
+    int ret;
+    int n_added = 0;
+    time_t now;
+
+    if (strchr(path, '*')) {
+        return tail_http_filter_scan_pattern(path, http_ctx);
+    }
+
+    now = time(NULL);
+    ret = tail_http_filter_register_file(path, http_ctx, now);
+    if (ret == 0) {
+        n_added++;
+    }
+
+    return n_added;
+}
+
+#else /* Linux/Unix */
+
+/*
+ * Linux/Unix: Scan path with HTTP filtering using glob
+ */
+static int tail_http_filter_scan_path(const char *path,
+                                      struct flb_tail_http_filter_config *http_ctx)
+{
+    int i;
+    int ret;
+    int count = 0;
+    glob_t globbuf;
+    time_t now;
+    int64_t mtime;
+    struct stat st;
+    ssize_t ignored_file_size;
+    struct flb_tail_config *ctx = http_ctx->tail_config;
+
+    ignored_file_size = -1;
+
+    flb_plg_debug(ctx->ins, "http_filter scanning path %s", path);
+
+    globbuf.gl_pathv = NULL;
+
+    ret = glob(path, GLOB_TILDE | GLOB_ERR, NULL, &globbuf);
+    if (ret != 0) {
+        switch (ret) {
+        case GLOB_NOSPACE:
+            flb_plg_error(ctx->ins, "no memory space available");
+            return -1;
+        case GLOB_ABORTED:
+            flb_plg_error(ctx->ins, "read error, check permissions: %s", path);
+            return -1;
+        case GLOB_NOMATCH:
+            ret = stat(path, &st);
+            if (ret == -1) {
+                flb_plg_debug(ctx->ins, "cannot read info from: %s", path);
+            }
+            else {
+                ret = access(path, R_OK);
+                if (ret == -1 && errno == EACCES) {
+                    flb_plg_error(ctx->ins, "NO read access for path: %s", path);
+                }
+                else {
+                    flb_plg_debug(ctx->ins, "NO matches for path: %s", path);
+                }
+            }
+            return 0;
+        }
+    }
+
+    now = time(NULL);
+    for (i = 0; i < globbuf.gl_pathc; i++) {
+        ret = stat(globbuf.gl_pathv[i], &st);
+        if (ret == 0 && S_ISREG(st.st_mode)) {
+            /* HTTP filter check */
+            if (is_file_allowed(globbuf.gl_pathv[i], http_ctx) == FLB_FALSE) {
+                flb_plg_debug(ctx->ins, "http_filter excluded=%s", globbuf.gl_pathv[i]);
+                continue;
+            }
+
+            /* Check if file is in exclude list */
+            if (tail_http_filter_is_excluded(globbuf.gl_pathv[i], ctx) == FLB_TRUE) {
+                flb_plg_debug(ctx->ins, "excluded=%s", globbuf.gl_pathv[i]);
+                continue;
+            }
+
+            if (ctx->ignore_older > 0) {
+                mtime = flb_tail_stat_mtime(&st);
+                if (mtime > 0) {
+                    if ((now - ctx->ignore_older) > mtime) {
+                        flb_plg_debug(ctx->ins, "excluded=%s (ignore_older)",
+                                      globbuf.gl_pathv[i]);
+                        flb_tail_scan_register_ignored_file_size(
+                            ctx, globbuf.gl_pathv[i], strlen(globbuf.gl_pathv[i]), st.st_size);
+                        continue;
+                    }
+                }
+            }
+
+            if (ctx->ignore_older > 0) {
+                ignored_file_size = flb_tail_scan_fetch_ignored_file_size(
+                                        ctx, globbuf.gl_pathv[i], strlen(globbuf.gl_pathv[i]));
+                flb_tail_scan_unregister_ignored_file_size(
+                    ctx, globbuf.gl_pathv[i], strlen(globbuf.gl_pathv[i]));
+            }
+
+            ret = flb_tail_file_append(globbuf.gl_pathv[i], &st,
+                                       FLB_TAIL_STATIC, ignored_file_size, ctx);
+
+            if (ret == 0) {
+                flb_plg_debug(ctx->ins, "http_filter scan add(): %s, inode %" PRIu64,
+                              globbuf.gl_pathv[i], (uint64_t) st.st_ino);
+                count++;
+            }
+            else {
+                flb_plg_debug(ctx->ins, "http_filter scan add(): dismissed: %s",
+                              globbuf.gl_pathv[i]);
+            }
+        }
+        else {
+            flb_plg_debug(ctx->ins, "skip (invalid) entry=%s", globbuf.gl_pathv[i]);
+        }
+    }
+
+    if (count > 0) {
+        tail_signal_manager(ctx);
+    }
+
+    globfree(&globbuf);
+    return count;
+}
+#endif /* FLB_SYSTEM_WINDOWS */
+
+/*
+ * Custom scan function with HTTP filtering
+ */
+static int tail_http_filter_scan(struct mk_list *path_list,
+                                 struct flb_tail_http_filter_config *http_ctx)
+{
+    int ret;
+    struct mk_list *head;
+    struct flb_slist_entry *pattern;
+    struct flb_tail_config *ctx = http_ctx->tail_config;
+
+    mk_list_foreach(head, path_list) {
+        pattern = mk_list_entry(head, struct flb_slist_entry, _head);
+        ret = tail_http_filter_scan_path(pattern->str, http_ctx);
+        if (ret == -1) {
+            flb_plg_warn(ctx->ins, "error scanning path: %s", pattern->str);
+        }
+        else {
+            flb_plg_debug(ctx->ins, "%i new files found on path '%s' (http filtered)",
+                          ret, pattern->str);
+        }
+    }
+
+    return 0;
 }
 
 int in_tail_http_filter_init(struct flb_input_instance *ins,
@@ -395,6 +738,224 @@ static struct flb_config_map config_map[] = {
      FLB_CONFIG_MAP_INT, "refresh_interval", "60",
      0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, refresh_interval),
      "Interval to refresh allowed patterns from HTTP URL"
+    },
+    
+    /* Inherit all in_tail plugin configuration options */
+    {
+     FLB_CONFIG_MAP_CLIST, "path", NULL,
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, path_list),
+     "pattern specifying log files or multiple ones through "
+     "the use of common wildcards."
+    },
+    {
+     FLB_CONFIG_MAP_CLIST, "exclude_path", NULL,
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, exclude_list),
+     "Set one or multiple shell patterns separated by commas to exclude "
+     "files matching a certain criteria, e.g: 'exclude_path *.gz,*.zip'"
+    },
+    {
+     FLB_CONFIG_MAP_STR, "key", "log",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, key),
+     "when a message is unstructured (no parser applied), it's appended "
+     "as a string under the key name log. This option allows to define an "
+     "alternative name for that key."
+    },
+    {
+     FLB_CONFIG_MAP_BOOL, "read_from_head", "false",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, read_from_head),
+     "For new discovered files on start (without a database offset/position), read the "
+     "content from the head of the file, not tail."
+    },
+    {
+     FLB_CONFIG_MAP_BOOL, "read_newly_discovered_files_from_head", "true",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, read_newly_discovered_files_from_head),
+     "For new discovered files after start (without a database offset/position), read the "
+     "content from the head of the file, not tail."
+    },
+    {
+     FLB_CONFIG_MAP_STR, "refresh_interval", "60",
+     0, FLB_FALSE, 0,
+     "interval to refresh the list of watched files expressed in seconds."
+    },
+    {
+     FLB_CONFIG_MAP_TIME, "watcher_interval", "2s",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, watcher_interval),
+     "Interval to watch for file changes."
+    },
+    {
+     FLB_CONFIG_MAP_TIME, "progress_check_interval", "2s",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, progress_check_interval),
+     "Interval to check for progress in file processing."
+    },
+    {
+     FLB_CONFIG_MAP_INT, "progress_check_interval_nsec", "0",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, progress_check_interval_nsec),
+     "Nanoseconds part of progress check interval."
+    },
+    {
+     FLB_CONFIG_MAP_TIME, "rotate_wait", "5",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, rotate_wait),
+     "specify the number of extra time in seconds to monitor a file once is "
+     "rotated in case some pending data is flushed."
+    },
+    {
+     FLB_CONFIG_MAP_BOOL, "docker_mode", "false",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, docker_mode),
+     "If enabled, the plugin will recombine split Docker log lines before "
+     "passing them to any parser as configured above. This mode cannot be "
+     "used at the same time as Multiline."
+    },
+    {
+     FLB_CONFIG_MAP_INT, "docker_mode_flush", "4",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, docker_mode_flush),
+     "wait period time in seconds to flush queued unfinished split lines."
+    },
+    {
+     FLB_CONFIG_MAP_STR, "path_key", NULL,
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, path_key),
+     "set the 'key' name where the name of monitored file will be appended."
+    },
+    {
+     FLB_CONFIG_MAP_STR, "offset_key", NULL,
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, offset_key),
+     "set the 'key' name where the offset of monitored file will be appended."
+    },
+    {
+     FLB_CONFIG_MAP_TIME, "ignore_older", "0",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, ignore_older),
+     "ignore records older than 'ignore_older'. Supports m,h,d (minutes, "
+     "hours, days) syntax. Default behavior is to read all records. Option "
+     "only available when a Parser is specified and it can parse the time "
+     "of a record."
+    },
+    {
+     FLB_CONFIG_MAP_BOOL, "ignore_active_older_files", "false",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, ignore_active_older_files),
+     "ignore files that are older than the value set in ignore_older even "
+     "if the file is being ingested."
+    },
+    {
+     FLB_CONFIG_MAP_SIZE, "buffer_chunk_size", "32k",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, buf_chunk_size),
+     "set the initial buffer size to read data from files. This value is "
+     "used too to increase buffer size."
+    },
+    {
+     FLB_CONFIG_MAP_SIZE, "buffer_max_size", "32k",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, buf_max_size),
+     "set the limit of the buffer size per monitored file. When a buffer "
+     "needs to be increased (e.g: very long lines), this value is used to "
+     "restrict how much the memory buffer can grow. If reading a file exceed "
+     "this limit, the file is removed from the monitored file list."
+    },
+    {
+     FLB_CONFIG_MAP_SIZE, "static_batch_size", "512k",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, static_batch_size),
+     "On start, Fluent Bit might process files which already contains data, "
+     "these files are called 'static' files. The configuration property "
+     "in question set's the maximum number of bytes to process per iteration "
+     "for the static files monitored."
+    },
+    {
+     FLB_CONFIG_MAP_SIZE, "event_batch_size", "512k",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, event_batch_size),
+     "When Fluent Bit is processing files in event based mode the amount of"
+     "data available for consumption could be too much and cause the input plugin "
+     "to over extend and smother other plugins"
+     "The configuration property sets the maximum number of bytes to process per iteration "
+     "for the files monitored (in event mode)."
+    },
+    {
+     FLB_CONFIG_MAP_BOOL, "skip_long_lines", "false",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, skip_long_lines),
+     "if a monitored file reach it buffer capacity due to a very long line "
+     "(buffer_max_size), the default behavior is to stop monitoring that "
+     "file. This option alter that behavior and instruct Fluent Bit to skip "
+     "long lines and continue processing other lines that fits into the buffer."
+    },
+    {
+     FLB_CONFIG_MAP_BOOL, "exit_on_eof", "false",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, exit_on_eof),
+     "exit Fluent Bit when reaching EOF on a monitored file."
+    },
+    {
+     FLB_CONFIG_MAP_BOOL, "skip_empty_lines", "false",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, skip_empty_lines),
+     "Allows to skip empty lines."
+    },
+    {
+     FLB_CONFIG_MAP_BOOL, "truncate_long_lines", "false",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, truncate_long_lines),
+     "Truncate overlong lines after input encoding to UTF-8"
+    },
+#ifdef __linux__
+    {
+     FLB_CONFIG_MAP_BOOL, "file_cache_advise", "true",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, file_cache_advise),
+     "Use posix_fadvise for file access. Advise not to use kernel file cache."
+    },
+#endif
+#ifdef FLB_HAVE_INOTIFY
+    {
+     FLB_CONFIG_MAP_BOOL, "inotify_watcher", "true",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, inotify_watcher),
+     "set to false to use file stat watcher instead of inotify."
+    },
+#endif
+
+    /* Multiline Options */
+#ifdef FLB_HAVE_PARSER
+    {
+     FLB_CONFIG_MAP_BOOL, "multiline", "false",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, multiline),
+     "if enabled, the plugin will try to discover multiline messages and use "
+     "the proper parsers to compose the outgoing messages. Note that when this "
+     "option is enabled the Parser option is not used."
+    },
+    {
+     FLB_CONFIG_MAP_TIME, "multiline_flush", "4",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, multiline_flush),
+     "wait period time in seconds to process queued multiline messages."
+    },
+    {
+     FLB_CONFIG_MAP_STR, "parser_firstline", NULL,
+     0, FLB_FALSE, 0,
+     "name of the parser that matches the beginning of a multiline message. "
+     "Note that the regular expression defined in the parser must include a "
+     "group name (named capture)."
+    },
+    {
+     FLB_CONFIG_MAP_STR_PREFIX, "parser_", NULL,
+     0, FLB_FALSE, 0,
+     "optional extra parser to interpret and structure multiline entries. This "
+     "option can be used to define multiple parsers, e.g: Parser_1 ab1, "
+     "Parser_2 ab2, Parser_N abN."
+    },
+
+    /* Multiline Core Engine based API */
+    {
+     FLB_CONFIG_MAP_CLIST, "multiline.parser", NULL,
+     FLB_CONFIG_MAP_MULT, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, multiline_parsers),
+     "specify one or multiple multiline parsers: docker, cri, go, java, etc."
+    },
+#endif
+
+#ifdef FLB_HAVE_UNICODE_ENCODER
+    {
+     FLB_CONFIG_MAP_STR, "unicode.encoding", NULL,
+     0, FLB_FALSE, 0,
+     "specify the preferred input encoding for converting to UTF-8. "
+     "Currently, UTF-16LE, UTF-16BE, auto are supported.",
+    },
+#endif
+    {
+     FLB_CONFIG_MAP_STR, "generic.encoding", NULL,
+     0, FLB_FALSE, 0,
+     "specify the preferred input encoding for converting to UTF-8. "
+     "Currently, the following encodings are supported: "
+     "ShiftJIS, UHC, GBK, GB18030, Big5, "
+     "Win866, Win874, "
+     "Win1250, Win1251, Win1252, Win2513, Win1254, Win1255, WIn1256",
     },
     
     {0}

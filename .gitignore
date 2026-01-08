@@ -43,3 +43,7 @@ examples/wasi_serde_json/target/
 tests/runtime/wasm/go/*.wasm
 # Trae IDE files
 .trae/
+
+
+
+.claude/
