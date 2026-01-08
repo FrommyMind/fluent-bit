@@ -41,3 +41,5 @@ workflow/
 examples/wasi_serde_json/target/
 # WASM test data
 tests/runtime/wasm/go/*.wasm
+# Trae IDE files
+.trae/
