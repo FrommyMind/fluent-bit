@@ -105,8 +105,7 @@ static int in_tail_http_filter_collect_pending(struct flb_input_instance *ins,
     int active = 0;
     struct mk_list *tmp;
     struct mk_list *head;
-    struct flb_tail_http_filter_config *http_ctx = in_context;
-    struct flb_tail_config *ctx = http_ctx->tail_config;
+    struct flb_tail_config *ctx = in_context;
     struct flb_tail_file *file;
     struct stat st;
     uint64_t pre;
@@ -185,8 +184,7 @@ static int in_tail_http_filter_collect_static(struct flb_input_instance *ins,
     int completed = FLB_FALSE;
     struct mk_list *tmp;
     struct mk_list *head;
-    struct flb_tail_http_filter_config *http_ctx = in_context;
-    struct flb_tail_config *ctx = http_ctx->tail_config;
+    struct flb_tail_config *ctx = in_context;
     struct flb_tail_file *file;
     uint64_t pre;
     uint64_t total_processed = 0;
@@ -255,8 +253,7 @@ static int in_tail_http_filter_watcher_callback(struct flb_input_instance *ins,
     int ret = 0;
     struct mk_list *tmp;
     struct mk_list *head;
-    struct flb_tail_http_filter_config *http_ctx = context;
-    struct flb_tail_config *ctx = http_ctx->tail_config;
+    struct flb_tail_config *ctx = context;
     struct flb_tail_file *file;
     (void) config;
 
