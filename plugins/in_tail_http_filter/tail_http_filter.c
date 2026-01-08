@@ -608,8 +608,17 @@ int in_tail_http_filter_init(struct flb_input_instance *ins,
         return -1;
     }
     
+    /* Fetch HTTP filter patterns */
     fetch_http_data(ctx, config);
-    
+
+    /* Initial scan of files with HTTP filtering */
+    tail_http_filter_scan(tail_config->path_list, ctx);
+
+    /* Set read_from_head for newly discovered files after initial scan */
+    if (tail_config->read_newly_discovered_files_from_head) {
+        tail_config->read_from_head = FLB_TRUE;
+    }
+
     flb_input_set_context(ins, ctx);
     
     ret = flb_input_set_collector_event(ins, in_tail_http_filter_collect_static,
