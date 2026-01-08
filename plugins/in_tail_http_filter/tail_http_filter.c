@@ -388,6 +388,9 @@ int fetch_http_data(struct flb_tail_http_filter_config *ctx, struct flb_config *
 
     json_root = yyjson_doc_get_root(json_doc);
     json_array = yyjson_obj_get(json_root, ctx->http_key);
+     /* 打印获取到的整个 JSON key 内容 */
+    flb_plg_info(ctx->tail_config->ins, "http获取的key结果: %s", yyjson_val_write(json_root, 0, NULL));
+    
     if (!json_array || !yyjson_is_arr(json_array))
     {
         flb_plg_error(ctx->tail_config->ins, "invalid json structure: %s is not an array", ctx->http_key);
