@@ -52,15 +52,36 @@
 #include "../in_tail/tail_file.h"
 #include "../in_tail/tail_signal.h"
 #include "../in_tail/tail_file_internal.h"
+#include "../in_tail/tail_fs.h"
 
 struct pattern_entry {
     flb_sds_t pattern;
     struct mk_list _head;
 };
 
+/* Global list to store http filter configs for lookup */
+static struct mk_list http_filter_configs;
+static int http_filter_configs_initialized = 0;
+
 /* Forward declarations */
 static int tail_http_filter_scan(struct mk_list *path_list,
                                  struct flb_tail_http_filter_config *http_ctx);
+
+/* Helper function to find http_ctx from tail_config */
+static struct flb_tail_http_filter_config *get_http_ctx_from_tail_config(
+    struct flb_tail_config *tail_config)
+{
+    struct mk_list *head;
+    struct flb_tail_http_filter_config *http_ctx;
+
+    mk_list_foreach(head, &http_filter_configs) {
+        http_ctx = mk_list_entry(head, struct flb_tail_http_filter_config, _head);
+        if (http_ctx->tail_config == tail_config) {
+            return http_ctx;
+        }
+    }
+    return NULL;
+}
 
 static inline int consume_byte(flb_pipefd_t fd)
 {
@@ -255,16 +276,23 @@ static int in_tail_http_filter_watcher_callback(struct flb_input_instance *ins,
 static int in_tail_http_filter_scan_callback(struct flb_input_instance *ins,
                                             struct flb_config *config, void *context)
 {
-    struct flb_tail_http_filter_config *ctx = context;
+    struct flb_tail_config *tail_ctx = context;
+    struct flb_tail_http_filter_config *http_ctx;
     time_t now = time(NULL);
 
+    http_ctx = get_http_ctx_from_tail_config(tail_ctx);
+    if (!http_ctx) {
+        flb_plg_error(ins, "http_ctx not found for tail_config");
+        return -1;
+    }
+
     /* Refresh HTTP patterns if interval has passed */
-    if (now - ctx->last_fetch_time > ctx->refresh_interval) {
-        fetch_http_data(ctx, config);
+    if (now - http_ctx->last_fetch_time > http_ctx->refresh_interval) {
+        fetch_http_data(http_ctx, config);
     }
 
     /* Use custom scan function with HTTP filtering */
-    return tail_http_filter_scan(ctx->tail_config->path_list, ctx);
+    return tail_http_filter_scan(tail_ctx->path_list, http_ctx);
 }
 
 int fetch_http_data(struct flb_tail_http_filter_config *ctx, struct flb_config *config)
@@ -744,7 +772,13 @@ int in_tail_http_filter_init(struct flb_input_instance *ins,
 
     /* Initialize allowed_patterns list AFTER config_map_set to avoid being overwritten */
     mk_list_init(&ctx->allowed_patterns);
-    
+
+    /* Initialize global config list if needed */
+    if (!http_filter_configs_initialized) {
+        mk_list_init(&http_filter_configs);
+        http_filter_configs_initialized = 1;
+    }
+
     tail_config = flb_tail_config_create(ins, config);
     if (!tail_config) {
         flb_plg_error(ins, "failed to create tail config");
@@ -789,7 +823,11 @@ int in_tail_http_filter_init(struct flb_input_instance *ins,
         tail_config->read_from_head = FLB_TRUE;
     }
 
-    flb_input_set_context(ins, ctx);
+    /* Add http_ctx to global list for lookup */
+    mk_list_add(&ctx->_head, &http_filter_configs);
+
+    /* Set context to tail_config (required for fs callbacks registered by flb_tail_fs_init) */
+    flb_input_set_context(ins, tail_config);
     
     ret = flb_input_set_collector_event(ins, in_tail_http_filter_collect_static,
                                        tail_config->ch_manager[0], config);
@@ -847,59 +885,65 @@ int in_tail_http_filter_init(struct flb_input_instance *ins,
 int in_tail_http_filter_pre_run(struct flb_input_instance *ins,
                                 struct flb_config *config, void *in_context)
 {
-    struct flb_tail_http_filter_config *ctx = in_context;
+    struct flb_tail_config *ctx = in_context;
     (void) ins;
     (void) config;
 
-    return tail_signal_manager(ctx->tail_config);
+    return tail_signal_manager(ctx);
 }
 
 int in_tail_http_filter_exit(void *data, struct flb_config *config)
 {
-    struct flb_tail_http_filter_config *ctx = data;
-    
-    if (ctx) {
-        if (ctx->upstream) {
-            flb_upstream_destroy(ctx->upstream);
+    struct flb_tail_config *tail_ctx = data;
+    struct flb_tail_http_filter_config *http_ctx;
+
+    if (tail_ctx) {
+        http_ctx = get_http_ctx_from_tail_config(tail_ctx);
+        if (http_ctx) {
+            /* Remove from global list */
+            mk_list_del(&http_ctx->_head);
+
+            if (http_ctx->upstream) {
+                flb_upstream_destroy(http_ctx->upstream);
+            }
+
+            struct pattern_entry *entry;
+            struct mk_list *curr, *next;
+            mk_list_foreach_safe(curr, next, &http_ctx->allowed_patterns) {
+                entry = mk_list_entry(curr, struct pattern_entry, _head);
+                flb_sds_destroy(entry->pattern);
+                mk_list_del(&entry->_head);
+                flb_free(entry);
+            }
+
+            flb_sds_destroy(http_ctx->http_url);
+            flb_sds_destroy(http_ctx->http_key);
+            flb_free(http_ctx);
         }
-        
-        struct pattern_entry *entry;
-        struct mk_list *curr, *next;
-        mk_list_foreach_safe(curr, next, &ctx->allowed_patterns) {
-            entry = mk_list_entry(curr, struct pattern_entry, _head);
-            flb_sds_destroy(entry->pattern);
-            mk_list_del(&entry->_head);
-            flb_free(entry);
-        }
-        
-        flb_sds_destroy(ctx->http_url);
-        flb_sds_destroy(ctx->http_key);
-        
-        if (ctx->tail_config) {
-            flb_tail_config_destroy(ctx->tail_config);
-        }
-        
-        flb_free(ctx);
+
+        flb_tail_file_remove_all(tail_ctx);
+        flb_tail_fs_exit(tail_ctx);
+        flb_tail_config_destroy(tail_ctx);
     }
-    
+
     return 0;
 }
 
 void in_tail_http_filter_pause(void *data, struct flb_config *config)
 {
-    struct flb_tail_http_filter_config *ctx = data;
-    if (ctx && ctx->tail_config) {
-        flb_input_collector_pause(ctx->tail_config->coll_fd_static, ctx->tail_config->ins);
-        flb_input_collector_pause(ctx->tail_config->coll_fd_pending, ctx->tail_config->ins);
+    struct flb_tail_config *ctx = data;
+    if (ctx) {
+        flb_input_collector_pause(ctx->coll_fd_static, ctx->ins);
+        flb_input_collector_pause(ctx->coll_fd_pending, ctx->ins);
     }
 }
 
 void in_tail_http_filter_resume(void *data, struct flb_config *config)
 {
-    struct flb_tail_http_filter_config *ctx = data;
-    if (ctx && ctx->tail_config) {
-        flb_input_collector_resume(ctx->tail_config->coll_fd_static, ctx->tail_config->ins);
-        flb_input_collector_resume(ctx->tail_config->coll_fd_pending, ctx->tail_config->ins);
+    struct flb_tail_config *ctx = data;
+    if (ctx) {
+        flb_input_collector_resume(ctx->coll_fd_static, ctx->ins);
+        flb_input_collector_resume(ctx->coll_fd_pending, ctx->ins);
     }
 }
 

@@ -35,6 +35,7 @@ struct flb_tail_http_filter_config {
     struct mk_list allowed_patterns;
     time_t last_fetch_time;
     int refresh_interval;
+    struct mk_list _head;  /* Link for global config list */
 };
 
 int in_tail_http_filter_init(struct flb_input_instance *ins,
