@@ -51,6 +51,7 @@
 #include "../in_tail/tail_scan.h"
 #include "../in_tail/tail_file.h"
 #include "../in_tail/tail_signal.h"
+#include "../in_tail/tail_file_internal.h"
 
 struct pattern_entry {
     flb_sds_t pattern;
@@ -61,25 +62,194 @@ struct pattern_entry {
 static int tail_http_filter_scan(struct mk_list *path_list,
                                  struct flb_tail_http_filter_config *http_ctx);
 
+static inline int consume_byte(flb_pipefd_t fd)
+{
+    int ret;
+    uint64_t val;
+
+    ret = flb_pipe_r(fd, (char *) &val, sizeof(val));
+    if (ret <= 0) {
+        flb_pipe_error();
+        return -1;
+    }
+
+    return 0;
+}
+
+/* Collect pending event files */
 static int in_tail_http_filter_collect_pending(struct flb_input_instance *ins,
                                               struct flb_config *config, void *in_context)
 {
-    struct flb_tail_http_filter_config *ctx = in_context;
-    return in_tail_collect_event(ctx->tail_config, config);
+    int ret;
+    int active = 0;
+    struct mk_list *tmp;
+    struct mk_list *head;
+    struct flb_tail_http_filter_config *http_ctx = in_context;
+    struct flb_tail_config *ctx = http_ctx->tail_config;
+    struct flb_tail_file *file;
+    struct stat st;
+    uint64_t pre;
+    uint64_t total_processed = 0;
+
+    /* Iterate promoted event files with pending bytes */
+    mk_list_foreach_safe(head, tmp, &ctx->files_event) {
+        file = mk_list_entry(head, struct flb_tail_file, _head);
+
+        if (file->watch_fd == -1 || (file->offset >= file->size)) {
+            ret = fstat(file->fd, &st);
+            if (ret == -1) {
+                flb_errno();
+                flb_tail_file_remove(file);
+                continue;
+            }
+            file->size = st.st_size;
+            file->pending_bytes = (file->size - file->offset);
+        }
+        else {
+            memset(&st, 0, sizeof(struct stat));
+        }
+
+        if (file->pending_bytes <= 0) {
+            if (file->decompression_context == NULL ||
+               file->decompression_context->input_buffer_length == 0) {
+                continue;
+            }
+        }
+
+        if (ctx->event_batch_size > 0 && total_processed >= ctx->event_batch_size) {
+            break;
+        }
+
+        pre = file->offset;
+        ret = flb_tail_file_chunk(file);
+
+        if (file->offset > pre) {
+            total_processed += (file->offset - pre);
+        }
+
+        switch (ret) {
+        case FLB_TAIL_ERROR:
+            flb_tail_file_remove(file);
+            break;
+        case FLB_TAIL_OK:
+        case FLB_TAIL_BUSY:
+            if (file->offset < file->size) {
+                file->pending_bytes = (file->size - file->offset);
+                active++;
+            }
+            else if (file->decompression_context != NULL &&
+                    file->decompression_context->input_buffer_length > 0) {
+                active++;
+            }
+            else {
+                file->pending_bytes = 0;
+            }
+            break;
+        }
+    }
+
+    if (active == 0) {
+        tail_consume_pending(ctx);
+    }
+
+    return 0;
 }
 
+/* Collect static files */
 static int in_tail_http_filter_collect_static(struct flb_input_instance *ins,
                                              struct flb_config *config, void *in_context)
 {
-    struct flb_tail_http_filter_config *ctx = in_context;
-    return in_tail_collect_event(ctx->tail_config, config);
+    int ret;
+    int active = 0;
+    int completed = FLB_FALSE;
+    struct mk_list *tmp;
+    struct mk_list *head;
+    struct flb_tail_http_filter_config *http_ctx = in_context;
+    struct flb_tail_config *ctx = http_ctx->tail_config;
+    struct flb_tail_file *file;
+    uint64_t pre;
+    uint64_t total_processed = 0;
+
+    mk_list_foreach_safe(head, tmp, &ctx->files_static) {
+        file = mk_list_entry(head, struct flb_tail_file, _head);
+
+        if (ctx->static_batch_size > 0 && total_processed >= ctx->static_batch_size) {
+            break;
+        }
+
+        pre = file->stream_offset;
+        ret = flb_tail_file_chunk(file);
+
+        if (file->stream_offset > pre) {
+            total_processed += (file->stream_offset - pre);
+        }
+
+        switch (ret) {
+        case FLB_TAIL_ERROR:
+            flb_tail_file_remove(file);
+            break;
+        case FLB_TAIL_OK:
+        case FLB_TAIL_BUSY:
+            active++;
+            break;
+        case FLB_TAIL_WAIT:
+            if (file->decompression_context != NULL &&
+               file->decompression_context->input_buffer_length > 0) {
+                active++;
+                break;
+            }
+
+            if (file->config->exit_on_eof) {
+                flb_plg_info(ctx->ins, "inode=%"PRIu64" file=%s ended, stop",
+                             file->inode, file->name);
+                if (ctx->files_static_count == 1) {
+                    flb_engine_exit(config);
+                }
+            }
+            flb_plg_debug(ctx->ins, "inode=%"PRIu64" file=%s promote to TAIL_EVENT",
+                          file->inode, file->name);
+            ret = flb_tail_file_to_event(file);
+            if (ret == -1) {
+                flb_plg_debug(ctx->ins, "file=%s cannot promote, unregistering",
+                              file->name);
+                flb_tail_file_remove(file);
+            }
+            break;
+        }
+    }
+
+    if (active == 0) {
+        consume_byte(ctx->ch_manager[0]);
+        ctx->ch_reads++;
+        completed = FLB_TRUE;
+    }
+
+    return 0;
 }
 
+/* Watcher callback to check for rotated files */
 static int in_tail_http_filter_watcher_callback(struct flb_input_instance *ins,
                                                struct flb_config *config, void *context)
 {
-    struct flb_tail_http_filter_config *ctx = context;
-    return in_tail_collect_event(ctx->tail_config, config);
+    int ret = 0;
+    struct mk_list *tmp;
+    struct mk_list *head;
+    struct flb_tail_http_filter_config *http_ctx = context;
+    struct flb_tail_config *ctx = http_ctx->tail_config;
+    struct flb_tail_file *file;
+    (void) config;
+
+    mk_list_foreach_safe(head, tmp, &ctx->files_event) {
+        file = mk_list_entry(head, struct flb_tail_file, _head);
+        if (file->is_link == FLB_TRUE) {
+            ret = flb_tail_file_is_rotated(ctx, file);
+            if (ret == FLB_FALSE) {
+                continue;
+            }
+            flb_tail_file_rotated(file);
+        }
+    }
+    return ret;
 }
 
 static int in_tail_http_filter_scan_callback(struct flb_input_instance *ins,
