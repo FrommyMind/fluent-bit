@@ -314,7 +314,10 @@ static int in_tail_http_filter_scan_callback(struct flb_input_instance *ins,
     }
 
     /* Refresh HTTP patterns if interval has passed */
-    if (now - http_ctx->last_fetch_time > http_ctx->refresh_interval)
+    flb_plg_debug(ins, "http refresh check: now=%ld, last_fetch=%ld, interval=%d, diff=%ld",
+                  (long)now, (long)http_ctx->last_fetch_time,
+                  http_ctx->http_refresh_interval, (long)(now - http_ctx->last_fetch_time));
+    if (now - http_ctx->last_fetch_time > http_ctx->http_refresh_interval)
     {
         fetch_http_data(http_ctx, config);
     }
@@ -886,7 +889,7 @@ int in_tail_http_filter_init(struct flb_input_instance *ins,
     ctx->http_url = flb_sds_create("http://localhost:8080");
     ctx->http_key = flb_sds_create("allowed_patterns");
     ctx->http_timeout = 5;
-    ctx->refresh_interval = 60;
+    ctx->http_refresh_interval = 60;
     ctx->last_fetch_time = 0;
 
     ret = flb_input_config_map_set(ins, (void *)ctx);
@@ -1101,8 +1104,8 @@ static struct flb_config_map config_map[] = {
     {FLB_CONFIG_MAP_INT, "http_timeout", "5",
      0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, http_timeout),
      "HTTP request timeout in seconds"},
-    {FLB_CONFIG_MAP_INT, "refresh_interval", "60",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, refresh_interval),
+    {FLB_CONFIG_MAP_INT, "http_refresh_interval", "60",
+     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, http_refresh_interval),
      "Interval to refresh allowed patterns from HTTP URL"},
 
     /* Inherit all in_tail plugin configuration options */
