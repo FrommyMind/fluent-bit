@@ -458,8 +458,15 @@ int is_file_allowed(const char *file_path, struct flb_tail_http_filter_config *c
             return FLB_TRUE;
         }
     }
-    flb_plg_debug(ctx->tail_config->ins, "file %s not match any pattern", file_path);
+     // 打印最终结果
+    if (ctx->tail_config && ctx->tail_config->ins)
+    {
+        flb_plg_debug(ctx->tail_config->ins, "file %s not match any pattern", file_path);
+    }else {
+        flb_plg_debug(NULL, "tail config or ins is null");
+    }
     
+
     return FLB_FALSE;
 }
 
