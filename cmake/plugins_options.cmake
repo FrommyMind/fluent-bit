@@ -56,6 +56,7 @@ DEFINE_OPTION(FLB_IN_STORAGE_BACKLOG          "Enable storage backlog input plug
 DEFINE_OPTION(FLB_IN_SYSLOG                   "Enable Syslog input plugin"                   ON)
 DEFINE_OPTION(FLB_IN_SYSTEMD                  "Enable Systemd input plugin"                  ON)
 DEFINE_OPTION(FLB_IN_TAIL                     "Enable Tail input plugin"                     ON)
+DEFINE_OPTION(FLB_IN_TAIL_HTTP_FILTER          "Enable Tail HTTP Filter input plugin"         ON)
 DEFINE_OPTION(FLB_IN_TCP                      "Enable TCP input plugin"                      ON)
 DEFINE_OPTION(FLB_IN_THERMAL                  "Enable Thermal plugin"                        ON)
 DEFINE_OPTION(FLB_IN_UDP                      "Enable UDP input plugin"                      ON)
