@@ -555,14 +555,14 @@ int in_tail_http_filter_init(struct flb_input_instance *ins,
         flb_errno();
         return -1;
     }
-    
+
+    /* Set defaults before config_map_set which may override them */
     ctx->http_url = flb_sds_create("http://localhost:8080");
     ctx->http_key = flb_sds_create("allowed_patterns");
     ctx->http_timeout = 5;
     ctx->refresh_interval = 60;
     ctx->last_fetch_time = 0;
-    mk_list_init(&ctx->allowed_patterns);
-    
+
     ret = flb_input_config_map_set(ins, (void *) ctx);
     if (ret == -1) {
         flb_plg_error(ins, "configuration error");
@@ -571,6 +571,9 @@ int in_tail_http_filter_init(struct flb_input_instance *ins,
         flb_free(ctx);
         return -1;
     }
+
+    /* Initialize allowed_patterns list AFTER config_map_set to avoid being overwritten */
+    mk_list_init(&ctx->allowed_patterns);
     
     tail_config = flb_tail_config_create(ins, config);
     if (!tail_config) {
