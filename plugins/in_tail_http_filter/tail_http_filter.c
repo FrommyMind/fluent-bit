@@ -457,6 +457,9 @@ int is_file_allowed(const char *file_path, struct flb_tail_http_filter_config *c
         {
             return FLB_TRUE;
         }
+        else {
+            flb_plg_debug(ctx->tail_config->ins, "file %s not match pattern %s", file_path, entry->pattern);
+        }
     }
 
     return FLB_FALSE;
