@@ -621,6 +621,14 @@ static int tail_http_filter_scan_pattern(const char *path,
         return 0;
     }
 
+    /* If no patterns fetched from HTTP, skip all files */
+    if (mk_list_is_empty(&http_ctx->allowed_patterns) == 0)
+    {
+        flb_plg_debug(ctx->ins, "no patterns fetched from HTTP, skipping all files");
+        FindClose(h);
+        return 0;
+    }
+
     now = time(NULL);
     do
     {
@@ -746,6 +754,14 @@ static int tail_http_filter_scan_path(const char *path,
             }
             return 0;
         }
+    }
+
+    /* If no patterns fetched from HTTP, skip all files */
+    if (mk_list_is_empty(&http_ctx->allowed_patterns) == 0)
+    {
+        flb_plg_debug(ctx->ins, "no patterns fetched from HTTP, skipping all files");
+        globfree(&globbuf);
+        return 0;
     }
 
     now = time(NULL);
