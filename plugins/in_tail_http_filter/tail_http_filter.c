@@ -410,6 +410,7 @@ int fetch_http_data(struct flb_tail_http_filter_config *ctx, struct flb_config *
     }
 
     size_t array_size = yyjson_arr_size(json_array);
+    int pattern_count = 0;
     for (i = 0; i < array_size; i++)
     {
         json_item = yyjson_arr_get(json_array, i);
@@ -422,6 +423,8 @@ int fetch_http_data(struct flb_tail_http_filter_config *ctx, struct flb_config *
                 if (entry->pattern)
                 {
                     mk_list_add(&entry->_head, &ctx->allowed_patterns);
+                    pattern_count++;
+                    flb_plg_debug(ctx->tail_config->ins, "added pattern: %s", entry->pattern);
                 }
                 else
                 {
@@ -430,6 +433,8 @@ int fetch_http_data(struct flb_tail_http_filter_config *ctx, struct flb_config *
             }
         }
     }
+
+    flb_plg_info(ctx->tail_config->ins, "fetch_http_data: ctx=%p, added %d patterns", ctx, pattern_count);
 
     yyjson_doc_free(json_doc);
     flb_http_client_destroy(client);
@@ -443,9 +448,18 @@ int is_file_allowed(const char *file_path, struct flb_tail_http_filter_config *c
 {
     struct pattern_entry *entry;
     struct mk_list *curr;
+    int pattern_count = 0;
+
+    /* Count patterns for debugging */
+    mk_list_foreach(curr, &ctx->allowed_patterns)
+    {
+        pattern_count++;
+    }
+
+    flb_debug("is_file_allowed: ctx=%p, pattern_count=%d, file=%s", ctx, pattern_count, file_path);
 
     if (mk_list_is_empty(&ctx->allowed_patterns))
-    {   
+    {
         flb_debug("no patterns fetched from HTTP, allow none files");
         /* If no patterns fetched from HTTP, allow none files */
         return FLB_FALSE;
