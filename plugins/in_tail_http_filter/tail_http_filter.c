@@ -669,7 +669,10 @@ int in_tail_http_filter_pre_run(struct flb_input_instance *ins,
                                 struct flb_config *config, void *in_context)
 {
     struct flb_tail_http_filter_config *ctx = in_context;
-    return in_tail_collect_event(ctx->tail_config, config);
+    (void) ins;
+    (void) config;
+
+    return tail_signal_manager(ctx->tail_config);
 }
 
 int in_tail_http_filter_exit(void *data, struct flb_config *config)
