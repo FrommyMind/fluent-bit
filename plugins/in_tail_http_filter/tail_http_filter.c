@@ -458,7 +458,7 @@ int is_file_allowed(const char *file_path, struct flb_tail_http_filter_config *c
 
     flb_debug("is_file_allowed: ctx=%p, pattern_count=%d, file=%s", ctx, pattern_count, file_path);
 
-    if (mk_list_is_empty(&ctx->allowed_patterns))
+    if (mk_list_is_empty(&ctx->allowed_patterns) == 0)
     {
         flb_debug("no patterns fetched from HTTP, allow none files");
         /* If no patterns fetched from HTTP, allow none files */
