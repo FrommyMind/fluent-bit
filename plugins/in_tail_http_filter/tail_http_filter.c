@@ -902,6 +902,14 @@ int in_tail_http_filter_init(struct flb_input_instance *ins,
         return -1;
     }
 
+    /* Fix http_refresh_interval if corrupted by config_map_set (due to inherited config offset issues) */
+    if (ctx->http_refresh_interval <= 0 || ctx->http_refresh_interval > 86400)
+    {
+        flb_plg_warn(ins, "http_refresh_interval invalid (%d), resetting to 60",
+                     ctx->http_refresh_interval);
+        ctx->http_refresh_interval = 60;
+    }
+
     /* Initialize allowed_patterns list AFTER config_map_set to avoid being overwritten */
     mk_list_init(&ctx->allowed_patterns);
 
