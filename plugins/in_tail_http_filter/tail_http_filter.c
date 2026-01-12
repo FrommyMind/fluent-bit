@@ -878,6 +878,8 @@ int in_tail_http_filter_init(struct flb_input_instance *ins,
     struct flb_tail_http_filter_config *ctx;
     struct flb_tail_config *tail_config;
 
+    const char *tmp;
+
     ctx = flb_calloc(1, sizeof(struct flb_tail_http_filter_config));
     if (!ctx)
     {
@@ -885,32 +887,68 @@ int in_tail_http_filter_init(struct flb_input_instance *ins,
         return -1;
     }
 
-    /* Set defaults before config_map_set which may override them */
-    ctx->http_url = flb_sds_create("http://localhost:8080");
-    ctx->http_key = flb_sds_create("allowed_patterns");
-    ctx->http_timeout = 5;
-    ctx->http_refresh_interval = 60;
-    ctx->last_fetch_time = 0;
+    /*
+     * Read http_filter specific options manually using flb_input_get_property.
+     * We don't use flb_input_config_map_set for flb_tail_http_filter_config
+     * because the config_map also contains in_tail options which would corrupt
+     * memory (tail_config is a pointer, not embedded struct).
+     */
 
-    ret = flb_input_config_map_set(ins, (void *)ctx);
-    if (ret == -1)
+    /* http_url */
+    tmp = flb_input_get_property("http_url", ins);
+    if (tmp)
     {
-        flb_plg_error(ins, "configuration error");
-        flb_sds_destroy(ctx->http_url);
-        flb_sds_destroy(ctx->http_key);
-        flb_free(ctx);
-        return -1;
+        ctx->http_url = flb_sds_create(tmp);
+    }
+    else
+    {
+        ctx->http_url = flb_sds_create("http://localhost:8080");
     }
 
-    /* Fix http_refresh_interval if corrupted by config_map_set (due to inherited config offset issues) */
-    if (ctx->http_refresh_interval <= 0 || ctx->http_refresh_interval > 86400)
+    /* http_key */
+    tmp = flb_input_get_property("http_key", ins);
+    if (tmp)
     {
-        flb_plg_warn(ins, "http_refresh_interval invalid (%d), resetting to 60",
-                     ctx->http_refresh_interval);
+        ctx->http_key = flb_sds_create(tmp);
+    }
+    else
+    {
+        ctx->http_key = flb_sds_create("allowed_patterns");
+    }
+
+    /* http_timeout */
+    tmp = flb_input_get_property("http_timeout", ins);
+    if (tmp)
+    {
+        ctx->http_timeout = atoi(tmp);
+        if (ctx->http_timeout <= 0)
+        {
+            ctx->http_timeout = 5;
+        }
+    }
+    else
+    {
+        ctx->http_timeout = 5;
+    }
+
+    /* http_refresh_interval */
+    tmp = flb_input_get_property("http_refresh_interval", ins);
+    if (tmp)
+    {
+        ctx->http_refresh_interval = atoi(tmp);
+        if (ctx->http_refresh_interval <= 0)
+        {
+            ctx->http_refresh_interval = 60;
+        }
+    }
+    else
+    {
         ctx->http_refresh_interval = 60;
     }
 
-    /* Initialize allowed_patterns list AFTER config_map_set to avoid being overwritten */
+    ctx->last_fetch_time = 0;
+
+    /* Initialize allowed_patterns list */
     mk_list_init(&ctx->allowed_patterns);
 
     /* Initialize global config list if needed */
@@ -1102,176 +1140,163 @@ void in_tail_http_filter_resume(void *data, struct flb_config *config)
     }
 }
 
+/*
+ * Config map for tail_http_filter plugin.
+ *
+ * IMPORTANT: We only define http_filter specific options here.
+ * All in_tail options are handled by flb_tail_config_create() which uses
+ * in_tail's config_map internally. We must NOT define in_tail options here
+ * because the offset calculations would be wrong (tail_config is a pointer,
+ * not an embedded struct).
+ */
 static struct flb_config_map config_map[] = {
+    /* HTTP filter specific options - these use correct offsets */
     {FLB_CONFIG_MAP_STR, "http_url", "http://localhost:8080",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, http_url),
+     0, FLB_FALSE, 0,
      "HTTP URL to fetch allowed patterns"},
     {FLB_CONFIG_MAP_STR, "http_key", "allowed_patterns",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, http_key),
+     0, FLB_FALSE, 0,
      "Key in JSON response that contains allowed patterns array"},
     {FLB_CONFIG_MAP_INT, "http_timeout", "5",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, http_timeout),
+     0, FLB_FALSE, 0,
      "HTTP request timeout in seconds"},
     {FLB_CONFIG_MAP_INT, "http_refresh_interval", "60",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, http_refresh_interval),
+     0, FLB_FALSE, 0,
      "Interval to refresh allowed patterns from HTTP URL"},
 
-    /* Inherit all in_tail plugin configuration options */
-    {
-        FLB_CONFIG_MAP_CLIST, "path", NULL,
-        0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, path_list),
-        "pattern specifying log files or multiple ones through "
-        "the use of common wildcards."},
+    /*
+     * in_tail options - declare but don't auto-set (FLB_FALSE).
+     * These are here so fluent-bit config parser accepts them.
+     * Actual values are set by flb_tail_config_create() using in_tail's config_map.
+     */
+    {FLB_CONFIG_MAP_CLIST, "path", NULL,
+     0, FLB_FALSE, 0,
+     "pattern specifying log files"},
     {FLB_CONFIG_MAP_CLIST, "exclude_path", NULL,
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, exclude_list),
-     "Set one or multiple shell patterns separated by commas to exclude "
-     "files matching a certain criteria, e.g: 'exclude_path *.gz,*.zip'"},
+     0, FLB_FALSE, 0,
+     "patterns to exclude files"},
     {FLB_CONFIG_MAP_STR, "key", "log",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, key),
-     "when a message is unstructured (no parser applied), it's appended "
-     "as a string under the key name log. This option allows to define an "
-     "alternative name for that key."},
+     0, FLB_FALSE, 0,
+     "key name for unstructured messages"},
     {FLB_CONFIG_MAP_BOOL, "read_from_head", "false",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, read_from_head),
-     "For new discovered files on start (without a database offset/position), read the "
-     "content from the head of the file, not tail."},
+     0, FLB_FALSE, 0,
+     "read from head of file"},
     {FLB_CONFIG_MAP_BOOL, "read_newly_discovered_files_from_head", "true",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, read_newly_discovered_files_from_head),
-     "For new discovered files after start (without a database offset/position), read the "
-     "content from the head of the file, not tail."},
+     0, FLB_FALSE, 0,
+     "read new files from head"},
     {FLB_CONFIG_MAP_STR, "refresh_interval", "60",
      0, FLB_FALSE, 0,
-     "interval to refresh the list of watched files expressed in seconds."},
+     "interval to refresh watched files"},
     {FLB_CONFIG_MAP_TIME, "watcher_interval", "2s",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, watcher_interval),
-     "Interval to watch for file changes."},
+     0, FLB_FALSE, 0,
+     "interval to watch for file changes"},
     {FLB_CONFIG_MAP_TIME, "progress_check_interval", "2s",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, progress_check_interval),
-     "Interval to check for progress in file processing."},
+     0, FLB_FALSE, 0,
+     "interval to check file progress"},
     {FLB_CONFIG_MAP_INT, "progress_check_interval_nsec", "0",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, progress_check_interval_nsec),
-     "Nanoseconds part of progress check interval."},
+     0, FLB_FALSE, 0,
+     "nanoseconds part of progress check interval"},
     {FLB_CONFIG_MAP_TIME, "rotate_wait", "5",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, rotate_wait),
-     "specify the number of extra time in seconds to monitor a file once is "
-     "rotated in case some pending data is flushed."},
+     0, FLB_FALSE, 0,
+     "time to monitor rotated file"},
     {FLB_CONFIG_MAP_BOOL, "docker_mode", "false",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, docker_mode),
-     "If enabled, the plugin will recombine split Docker log lines before "
-     "passing them to any parser as configured above. This mode cannot be "
-     "used at the same time as Multiline."},
+     0, FLB_FALSE, 0,
+     "recombine split Docker log lines"},
     {FLB_CONFIG_MAP_INT, "docker_mode_flush", "4",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, docker_mode_flush),
-     "wait period time in seconds to flush queued unfinished split lines."},
+     0, FLB_FALSE, 0,
+     "flush queued split lines period"},
     {FLB_CONFIG_MAP_STR, "path_key", NULL,
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, path_key),
-     "set the 'key' name where the name of monitored file will be appended."},
+     0, FLB_FALSE, 0,
+     "key for monitored file name"},
     {FLB_CONFIG_MAP_STR, "offset_key", NULL,
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, offset_key),
-     "set the 'key' name where the offset of monitored file will be appended."},
+     0, FLB_FALSE, 0,
+     "key for file offset"},
     {FLB_CONFIG_MAP_TIME, "ignore_older", "0",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, ignore_older),
-     "ignore records older than 'ignore_older'. Supports m,h,d (minutes, "
-     "hours, days) syntax. Default behavior is to read all records. Option "
-     "only available when a Parser is specified and it can parse the time "
-     "of a record."},
+     0, FLB_FALSE, 0,
+     "ignore older records"},
     {FLB_CONFIG_MAP_BOOL, "ignore_active_older_files", "false",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, ignore_active_older_files),
-     "ignore files that are older than the value set in ignore_older even "
-     "if the file is being ingested."},
+     0, FLB_FALSE, 0,
+     "ignore older files even if active"},
     {FLB_CONFIG_MAP_SIZE, "buffer_chunk_size", "32k",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, buf_chunk_size),
-     "set the initial buffer size to read data from files. This value is "
-     "used too to increase buffer size."},
+     0, FLB_FALSE, 0,
+     "initial buffer size"},
     {FLB_CONFIG_MAP_SIZE, "buffer_max_size", "32k",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, buf_max_size),
-     "set the limit of the buffer size per monitored file. When a buffer "
-     "needs to be increased (e.g: very long lines), this value is used to "
-     "restrict how much the memory buffer can grow. If reading a file exceed "
-     "this limit, the file is removed from the monitored file list."},
+     0, FLB_FALSE, 0,
+     "max buffer size per file"},
     {FLB_CONFIG_MAP_SIZE, "static_batch_size", "512k",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, static_batch_size),
-     "On start, Fluent Bit might process files which already contains data, "
-     "these files are called 'static' files. The configuration property "
-     "in question set's the maximum number of bytes to process per iteration "
-     "for the static files monitored."},
+     0, FLB_FALSE, 0,
+     "batch size for static files"},
     {FLB_CONFIG_MAP_SIZE, "event_batch_size", "512k",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, event_batch_size),
-     "When Fluent Bit is processing files in event based mode the amount of"
-     "data available for consumption could be too much and cause the input plugin "
-     "to over extend and smother other plugins"
-     "The configuration property sets the maximum number of bytes to process per iteration "
-     "for the files monitored (in event mode)."},
+     0, FLB_FALSE, 0,
+     "batch size for event files"},
     {FLB_CONFIG_MAP_BOOL, "skip_long_lines", "false",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, skip_long_lines),
-     "if a monitored file reach it buffer capacity due to a very long line "
-     "(buffer_max_size), the default behavior is to stop monitoring that "
-     "file. This option alter that behavior and instruct Fluent Bit to skip "
-     "long lines and continue processing other lines that fits into the buffer."},
+     0, FLB_FALSE, 0,
+     "skip lines exceeding buffer"},
     {FLB_CONFIG_MAP_BOOL, "exit_on_eof", "false",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, exit_on_eof),
-     "exit Fluent Bit when reaching EOF on a monitored file."},
+     0, FLB_FALSE, 0,
+     "exit on EOF"},
     {FLB_CONFIG_MAP_BOOL, "skip_empty_lines", "false",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, skip_empty_lines),
-     "Allows to skip empty lines."},
+     0, FLB_FALSE, 0,
+     "skip empty lines"},
     {FLB_CONFIG_MAP_BOOL, "truncate_long_lines", "false",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, truncate_long_lines),
-     "Truncate overlong lines after input encoding to UTF-8"},
+     0, FLB_FALSE, 0,
+     "truncate overlong lines"},
 #ifdef __linux__
     {FLB_CONFIG_MAP_BOOL, "file_cache_advise", "true",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, file_cache_advise),
-     "Use posix_fadvise for file access. Advise not to use kernel file cache."},
+     0, FLB_FALSE, 0,
+     "use posix_fadvise"},
 #endif
 #ifdef FLB_HAVE_INOTIFY
     {FLB_CONFIG_MAP_BOOL, "inotify_watcher", "true",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, inotify_watcher),
-     "set to false to use file stat watcher instead of inotify."},
+     0, FLB_FALSE, 0,
+     "use inotify watcher"},
 #endif
-
-/* Multiline Options */
 #ifdef FLB_HAVE_PARSER
     {FLB_CONFIG_MAP_BOOL, "multiline", "false",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, multiline),
-     "if enabled, the plugin will try to discover multiline messages and use "
-     "the proper parsers to compose the outgoing messages. Note that when this "
-     "option is enabled the Parser option is not used."},
+     0, FLB_FALSE, 0,
+     "enable multiline"},
     {FLB_CONFIG_MAP_TIME, "multiline_flush", "4",
-     0, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, multiline_flush),
-     "wait period time in seconds to process queued multiline messages."},
+     0, FLB_FALSE, 0,
+     "multiline flush period"},
     {FLB_CONFIG_MAP_STR, "parser_firstline", NULL,
      0, FLB_FALSE, 0,
-     "name of the parser that matches the beginning of a multiline message. "
-     "Note that the regular expression defined in the parser must include a "
-     "group name (named capture)."},
+     "parser for first line"},
     {FLB_CONFIG_MAP_STR_PREFIX, "parser_", NULL,
      0, FLB_FALSE, 0,
-     "optional extra parser to interpret and structure multiline entries. This "
-     "option can be used to define multiple parsers, e.g: Parser_1 ab1, "
-     "Parser_2 ab2, Parser_N abN."},
-
-    /* Multiline Core Engine based API */
-    {
-        FLB_CONFIG_MAP_CLIST, "multiline.parser", NULL,
-        FLB_CONFIG_MAP_MULT, FLB_TRUE, offsetof(struct flb_tail_http_filter_config, tail_config) + offsetof(struct flb_tail_config, multiline_parsers),
-        "specify one or multiple multiline parsers: docker, cri, go, java, etc."},
+     "additional parsers"},
+    {FLB_CONFIG_MAP_CLIST, "multiline.parser", NULL,
+     FLB_CONFIG_MAP_MULT, FLB_FALSE, 0,
+     "multiline parsers"},
+    {FLB_CONFIG_MAP_STR, "parser", NULL,
+     0, FLB_FALSE, 0,
+     "parser name"},
+    {FLB_CONFIG_MAP_STR, "tag_regex", NULL,
+     0, FLB_FALSE, 0,
+     "regex for tag extraction"},
 #endif
-
+#ifdef FLB_HAVE_SQLDB
+    {FLB_CONFIG_MAP_STR, "db", NULL,
+     0, FLB_FALSE, 0,
+     "database file path"},
+    {FLB_CONFIG_MAP_STR, "db.sync", "normal",
+     0, FLB_FALSE, 0,
+     "database sync mode"},
+    {FLB_CONFIG_MAP_BOOL, "db.locking", "false",
+     0, FLB_FALSE, 0,
+     "database locking mode"},
+    {FLB_CONFIG_MAP_STR, "db.journal_mode", "WAL",
+     0, FLB_FALSE, 0,
+     "database journal mode"},
+    {FLB_CONFIG_MAP_BOOL, "db.compare_filename", "false",
+     0, FLB_FALSE, 0,
+     "compare filename in db"},
+#endif
 #ifdef FLB_HAVE_UNICODE_ENCODER
-    {
-        FLB_CONFIG_MAP_STR,
-        "unicode.encoding",
-        NULL,
-        0,
-        FLB_FALSE,
-        0,
-        "specify the preferred input encoding for converting to UTF-8. "
-        "Currently, UTF-16LE, UTF-16BE, auto are supported.",
-    },
+    {FLB_CONFIG_MAP_STR, "unicode.encoding", NULL,
+     0, FLB_FALSE, 0,
+     "input encoding for UTF-8 conversion"},
 #endif
-    {
-        FLB_CONFIG_MAP_STR,
-        "generic.encoding",
-        NULL,
+    {FLB_CONFIG_MAP_STR, "generic.encoding", NULL,
         0,
         FLB_FALSE,
         0,
