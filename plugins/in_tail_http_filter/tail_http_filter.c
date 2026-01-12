@@ -1241,17 +1241,19 @@ static struct flb_config_map config_map[] = {
     {FLB_CONFIG_MAP_BOOL, "truncate_long_lines", "false",
      0, FLB_FALSE, 0,
      "truncate overlong lines"},
-#ifdef __linux__
+
+    /*
+     * Platform/feature-specific options - always declare to accept config.
+     * Actual functionality depends on in_tail compilation options.
+     */
     {FLB_CONFIG_MAP_BOOL, "file_cache_advise", "true",
      0, FLB_FALSE, 0,
-     "use posix_fadvise"},
-#endif
-#ifdef FLB_HAVE_INOTIFY
+     "use posix_fadvise (Linux only)"},
     {FLB_CONFIG_MAP_BOOL, "inotify_watcher", "true",
      0, FLB_FALSE, 0,
-     "use inotify watcher"},
-#endif
-#ifdef FLB_HAVE_REGEX
+     "use inotify watcher (Linux only)"},
+
+    /* Regex-related options */
     {FLB_CONFIG_MAP_STR, "parser", NULL,
      0, FLB_FALSE, 0,
      "parser name"},
@@ -1261,8 +1263,8 @@ static struct flb_config_map config_map[] = {
     {FLB_CONFIG_MAP_STR, "docker_mode_parser", NULL,
      0, FLB_FALSE, 0,
      "parser for docker mode first line"},
-#endif
-#ifdef FLB_HAVE_PARSER
+
+    /* Multiline options */
     {FLB_CONFIG_MAP_BOOL, "multiline", "false",
      0, FLB_FALSE, 0,
      "enable multiline"},
@@ -1278,8 +1280,8 @@ static struct flb_config_map config_map[] = {
     {FLB_CONFIG_MAP_CLIST, "multiline.parser", NULL,
      FLB_CONFIG_MAP_MULT, FLB_FALSE, 0,
      "multiline parsers"},
-#endif
-#ifdef FLB_HAVE_SQLDB
+
+    /* Database options */
     {FLB_CONFIG_MAP_STR, "db", NULL,
      0, FLB_FALSE, 0,
      "database file path"},
@@ -1295,12 +1297,11 @@ static struct flb_config_map config_map[] = {
     {FLB_CONFIG_MAP_BOOL, "db.compare_filename", "false",
      0, FLB_FALSE, 0,
      "compare filename in db"},
-#endif
-#ifdef FLB_HAVE_UNICODE_ENCODER
+
+    /* Encoding options */
     {FLB_CONFIG_MAP_STR, "unicode.encoding", NULL,
      0, FLB_FALSE, 0,
      "input encoding for UTF-8 conversion"},
-#endif
     {
         FLB_CONFIG_MAP_STR,
         "generic.encoding",
