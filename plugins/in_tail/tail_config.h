@@ -38,24 +38,25 @@
 
 /* Metrics */
 #ifdef FLB_HAVE_METRICS
-#define FLB_TAIL_METRIC_F_OPENED  100  /* number of opened files  */
-#define FLB_TAIL_METRIC_F_CLOSED  101  /* number of closed files  */
-#define FLB_TAIL_METRIC_F_ROTATED 102  /* number of rotated files */
-#define FLB_TAIL_METRIC_M_TRUNCATED 103  /* number of truncated occurrences of multiline */
-#define FLB_TAIL_METRIC_L_TRUNCATED 104  /* number of truncated occurrences of long lines */
+#define FLB_TAIL_METRIC_F_OPENED 100    /* number of opened files  */
+#define FLB_TAIL_METRIC_F_CLOSED 101    /* number of closed files  */
+#define FLB_TAIL_METRIC_F_ROTATED 102   /* number of rotated files */
+#define FLB_TAIL_METRIC_M_TRUNCATED 103 /* number of truncated occurrences of multiline */
+#define FLB_TAIL_METRIC_L_TRUNCATED 104 /* number of truncated occurrences of long lines */
 #endif
 
-struct flb_tail_config {
-    int fd_notify;             /* inotify fd               */
-    flb_pipefd_t ch_manager[2];    /* pipe: channel manager    */
-    flb_pipefd_t ch_pending[2];    /* pipe: pending events     */
-    int ch_reads;              /* count number if signal reads */
-    int ch_writes;             /* count number of signal writes */
+struct flb_tail_config
+{
+    int fd_notify;              /* inotify fd               */
+    flb_pipefd_t ch_manager[2]; /* pipe: channel manager    */
+    flb_pipefd_t ch_pending[2]; /* pipe: pending events     */
+    int ch_reads;               /* count number if signal reads */
+    int ch_writes;              /* count number of signal writes */
 
     /* Buffer Config */
-    size_t buf_chunk_size;     /* allocation chunks        */
-    size_t buf_max_size;       /* max size of a buffer     */
-    int    truncate_long_lines; /* truncate long lines after re-encode */
+    size_t buf_chunk_size;   /* allocation chunks        */
+    size_t buf_max_size;     /* max size of a buffer     */
+    int truncate_long_lines; /* truncate long lines after re-encode */
 
     /* Static files processor */
     size_t static_batch_size;
@@ -75,42 +76,42 @@ struct flb_tail_config {
     int coll_fd_progress_check;
 
     /* Backend collectors */
-    int coll_fd_fs1;           /* used by fs_inotify & fs_stat */
-    int coll_fd_fs2;           /* only used by fs_stat         */
+    int coll_fd_fs1; /* used by fs_inotify & fs_stat */
+    int coll_fd_fs2; /* only used by fs_stat         */
 
     /* Configuration */
-    int dynamic_tag;           /* dynamic tag ? e.g: abc.*     */
+    int dynamic_tag; /* dynamic tag ? e.g: abc.*     */
 #ifdef FLB_HAVE_REGEX
-    struct flb_regex *tag_regex;/* path to tag regex           */
+    struct flb_regex *tag_regex; /* path to tag regex           */
 #endif
-    int refresh_interval_sec;  /* seconds to re-scan           */
-    long refresh_interval_nsec;/* nanoseconds to re-scan       */
+    int refresh_interval_sec;                  /* seconds to re-scan           */
+    long refresh_interval_nsec;                /* nanoseconds to re-scan       */
     int read_newly_discovered_files_from_head; /* read new files from head after startup */
-    int read_from_head;        /* read new files from head     */
-    int rotate_wait;           /* sec to wait on rotated files */
-    int watcher_interval;      /* watcher interval             */
-    int ignore_older;          /* ignore fields older than X seconds */
-    int ignore_active_older_files; /* ignore files that exceed the ignore
-                                    * older limit even if they are already
-                                    * being ingested */
-    time_t last_pending;       /* last time a 'pending signal' was emitted' */
-    struct mk_list *path_list; /* list of paths to scan (glob) */
-    flb_sds_t path_key;        /* key name of file path        */
-    flb_sds_t key;             /* key for unstructured record  */
-    int   skip_long_lines;     /* skip long lines              */
-    int   skip_empty_lines;    /* skip empty lines (off)       */
-    int   exit_on_eof;         /* exit fluent-bit on EOF, test */
+    int read_from_head;                        /* read new files from head     */
+    int rotate_wait;                           /* sec to wait on rotated files */
+    int watcher_interval;                      /* watcher interval             */
+    int ignore_older;                          /* ignore fields older than X seconds */
+    int ignore_active_older_files;             /* ignore files that exceed the ignore
+                                                * older limit even if they are already
+                                                * being ingested */
+    time_t last_pending;                       /* last time a 'pending signal' was emitted' */
+    struct mk_list *path_list;                 /* list of paths to scan (glob) */
+    flb_sds_t path_key;                        /* key name of file path        */
+    flb_sds_t key;                             /* key for unstructured record  */
+    int skip_long_lines;                       /* skip long lines              */
+    int skip_empty_lines;                      /* skip empty lines (off)       */
+    int exit_on_eof;                           /* exit fluent-bit on EOF, test */
 #ifdef __linux__
-    int   file_cache_advise;   /* Use posix_fadvise for file access */
+    int file_cache_advise; /* Use posix_fadvise for file access */
 #endif
 
     int progress_check_interval;      /* watcher interval             */
     int progress_check_interval_nsec; /* watcher interval             */
 
 #ifdef FLB_HAVE_INOTIFY
-    int   inotify_watcher;     /* enable/disable inotify monitor */
+    int inotify_watcher; /* enable/disable inotify monitor */
 #endif
-    flb_sds_t offset_key;      /* key name of file offset      */
+    flb_sds_t offset_key; /* key name of file offset      */
 
     /* Database */
 #ifdef FLB_HAVE_SQLDB
@@ -136,21 +137,21 @@ struct flb_tail_config {
     const char *generic_input_encoding_name;
 
     /* Multiline */
-    int multiline;             /* multiline enabled ?  */
-    int multiline_flush;       /* multiline flush/wait */
+    int multiline;       /* multiline enabled ?  */
+    int multiline_flush; /* multiline flush/wait */
     struct flb_parser *mult_parser_firstline;
     struct mk_list mult_parsers;
 
     /* Docker mode */
-    int docker_mode;           /* Docker mode enabled ?  */
-    int docker_mode_flush;     /* Docker mode flush/wait */
+    int docker_mode;                       /* Docker mode enabled ?  */
+    int docker_mode_flush;                 /* Docker mode flush/wait */
     struct flb_parser *docker_mode_parser; /* Parser for separate multiline logs */
 
     /* Multiline core engine */
     struct flb_ml *ml_ctx;
     struct mk_list *multiline_parsers;
 
-    uint64_t files_static_count;   /* number of items in the static file list */
+    uint64_t files_static_count; /* number of items in the static file list */
     struct mk_list files_static;
     struct mk_list files_event;
 
