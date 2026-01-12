@@ -476,7 +476,7 @@ int is_file_allowed(const char *file_path, struct flb_tail_http_filter_config *c
             return FLB_TRUE;
         }
     }
-    
+
     flb_debug("file %s not match any pattern", file_path);
 
     return FLB_FALSE;
@@ -1251,6 +1251,17 @@ static struct flb_config_map config_map[] = {
      0, FLB_FALSE, 0,
      "use inotify watcher"},
 #endif
+#ifdef FLB_HAVE_REGEX
+    {FLB_CONFIG_MAP_STR, "parser", NULL,
+     0, FLB_FALSE, 0,
+     "parser name"},
+    {FLB_CONFIG_MAP_STR, "tag_regex", NULL,
+     0, FLB_FALSE, 0,
+     "regex for tag extraction"},
+    {FLB_CONFIG_MAP_STR, "docker_mode_parser", NULL,
+     0, FLB_FALSE, 0,
+     "parser for docker mode first line"},
+#endif
 #ifdef FLB_HAVE_PARSER
     {FLB_CONFIG_MAP_BOOL, "multiline", "false",
      0, FLB_FALSE, 0,
@@ -1267,12 +1278,6 @@ static struct flb_config_map config_map[] = {
     {FLB_CONFIG_MAP_CLIST, "multiline.parser", NULL,
      FLB_CONFIG_MAP_MULT, FLB_FALSE, 0,
      "multiline parsers"},
-    {FLB_CONFIG_MAP_STR, "parser", NULL,
-     0, FLB_FALSE, 0,
-     "parser name"},
-    {FLB_CONFIG_MAP_STR, "tag_regex", NULL,
-     0, FLB_FALSE, 0,
-     "regex for tag extraction"},
 #endif
 #ifdef FLB_HAVE_SQLDB
     {FLB_CONFIG_MAP_STR, "db", NULL,
@@ -1296,7 +1301,10 @@ static struct flb_config_map config_map[] = {
      0, FLB_FALSE, 0,
      "input encoding for UTF-8 conversion"},
 #endif
-    {FLB_CONFIG_MAP_STR, "generic.encoding", NULL,
+    {
+        FLB_CONFIG_MAP_STR,
+        "generic.encoding",
+        NULL,
         0,
         FLB_FALSE,
         0,
